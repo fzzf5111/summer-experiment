@@ -292,6 +292,25 @@ total_cost ~= number_of_signatures * cost(ECDSA_verify)
 
 安全层面，Bitcoin 的共识代码必须保证“相同输入得到相同验签结果”。通用库可能因为版本升级改变 DER 容错行为、边界条件或解析细节，而专用的 `libsecp256k1` 可以把这些行为固定在 Bitcoin 需要的规则内。
 
+## 代码实现
+
+本目录提供了一个最小可运行脚本：
+
+```text
+python3 ecdsa_hash_forgery_demo.py
+```
+
+代码没有依赖第三方库，直接实现 secp256k1 的有限域运算、椭圆曲线点加、标量乘法和 ECDSA 验证。它演示的不是破解私钥，而是图片中的漏洞条件：验证方接受攻击者提供的 `e'` 时，可以构造 `(r', s')` 使验签通过；如果验证方自己计算 `H(message)`，同一个签名就不能冒充真实消息签名。
+
+核心构造对应如下代码：
+
+```python
+r_point = point_add(scalar_mult(u, G), scalar_mult(v, public_key))
+r = r_point[0] % N_ORDER
+s = (r * inverse_mod(v, N_ORDER)) % N_ORDER
+forged_hash = (r * u * inverse_mod(v, N_ORDER)) % N_ORDER
+```
+
 ## 实验结论
 
 本次实验可以总结为：
