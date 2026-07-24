@@ -18,6 +18,8 @@
  *   cl /O2 /arch:AVX512 sm3_x86_simd.c
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -46,7 +48,14 @@ static const uint32_t T[2] = { 0x79CC4519, 0x7A879D8A };
  * =========================================================================== */
 
 static inline uint32_t rotl32(uint32_t v, int n) {
-    return (v << n) | (v >> (32 - n));
+    n &= 31;
+    return n ? ((v << n) | (v >> (32 - n))) : v;
+}
+
+static size_t sm3_padded_len(size_t msglen) {
+    size_t padlen = msglen + 1;
+    while ((padlen % SM3_BLOCK_SIZE) != 56) padlen++;
+    return padlen + 8;
 }
 
 static uint32_t sm3_p0(uint32_t x) {
@@ -69,9 +78,7 @@ static uint32_t sm3_gg(uint32_t x, uint32_t y, uint32_t z, int j) {
 
 static void sm3_pad(const uint8_t *msg, size_t msglen,
                     uint8_t *padded, size_t *padlen) {
-    *padlen = msglen + 1;
-    while ((*padlen % SM3_BLOCK_SIZE) != 56) (*padlen)++;
-    *padlen += 8;
+    *padlen = sm3_padded_len(msglen);
 
     memcpy(padded, msg, msglen);
     padded[msglen] = 0x80;
@@ -120,8 +127,12 @@ static void sm3_compress_scalar(uint32_t state[8], const uint8_t block[64]) {
 }
 
 void sm3_hash_scalar(const uint8_t *msg, size_t msglen, uint8_t digest[32]) {
-    uint8_t padded[SM3_BLOCK_SIZE * 32]; /* enough for short messages */
-    size_t padlen;
+    size_t padlen = sm3_padded_len(msglen);
+    uint8_t *padded = (uint8_t *)malloc(padlen);
+    if (!padded) {
+        memset(digest, 0, SM3_DIGEST_SIZE);
+        return;
+    }
     sm3_pad(msg, msglen, padded, &padlen);
 
     uint32_t state[8];
@@ -136,6 +147,7 @@ void sm3_hash_scalar(const uint8_t *msg, size_t msglen, uint8_t digest[32]) {
         digest[4*i+2] = (uint8_t)(state[i] >> 8);
         digest[4*i+3] = (uint8_t)(state[i]);
     }
+    free(padded);
 }
 
 /* ===========================================================================
@@ -241,7 +253,6 @@ static void sm3_compress_avx2(__m256i state[8],
     /* Compression: 64 rounds */
     for (int j = 0; j < 64; j++) {
         uint32_t tj = (j < 16) ? T[0] : T[1];
-        __m256i tj_vec   = ymm_set1_epi32(tj);
         __m256i tj_rot   = ymm_set1_epi32(rotl32(tj, j % 32));
         __m256i a12      = ymm_rotl32(A, 12);
 
@@ -283,13 +294,18 @@ static void sm3_compress_avx2(__m256i state[8],
  */
 void sm3_hash_avx2_8x(const uint8_t *msgs[8], size_t msglen,
                       uint8_t digests[8][32]) {
-    /* Pad all messages identically (equal length => same pad length) */
-    uint8_t padded[8][SM3_BLOCK_SIZE * 32];
-    size_t padlen;
-    sm3_pad(msgs[0], msglen, padded[0], &padlen);
+    size_t padlen = sm3_padded_len(msglen);
+    uint8_t *padded = (uint8_t *)calloc(8, padlen);
+    if (!padded) {
+        for (int lane = 0; lane < 8; lane++)
+            sm3_hash_scalar(msgs[lane], msglen, digests[lane]);
+        return;
+    }
 
-    for (int lane = 0; lane < 8; lane++)
-        sm3_pad(msgs[lane], msglen, padded[lane], &padlen);
+    for (int lane = 0; lane < 8; lane++) {
+        size_t lane_padlen;
+        sm3_pad(msgs[lane], msglen, padded + lane * padlen, &lane_padlen);
+    }
 
     /* Initialize state for all 8 lanes */
     __m256i state[8];
@@ -301,7 +317,7 @@ void sm3_hash_avx2_8x(const uint8_t *msgs[8], size_t msglen,
     for (size_t b = 0; b < nblocks; b++) {
         uint32_t block_words[8][16];
         for (int lane = 0; lane < 8; lane++) {
-            const uint8_t *block = padded[lane] + b * SM3_BLOCK_SIZE;
+            const uint8_t *block = padded + lane * padlen + b * SM3_BLOCK_SIZE;
             for (int j = 0; j < 16; j++) {
                 block_words[lane][j] =
                     ((uint32_t)block[4*j]   << 24) |
@@ -313,27 +329,20 @@ void sm3_hash_avx2_8x(const uint8_t *msgs[8], size_t msglen,
         sm3_compress_avx2(state, block_words);
     }
 
-    /* Extract digests from lane 0 */
+    uint32_t state_buf[8][8];
+    for (int i = 0; i < 8; i++)
+        _mm256_storeu_si256((__m256i *)state_buf[i], state[i]);
+
     for (int lane = 0; lane < 8; lane++) {
         for (int i = 0; i < 8; i++) {
-            uint32_t val;
-            _mm256_maskstore_epi32((int*)&val, _mm256_set1_epi32(1), state[i]);
-            /* Simplified: in production, use pextract or store+lane indexing */
-            /* For now, store to aligned buffer and extract */
-        }
-        /* Extract: use a proper method to read per-lane values */
-        uint32_t state_buf[8 * 8] __attribute__((aligned(32)));
-        for (int i = 0; i < 8; i++)
-            _mm256_store_si256((__m256i*)(state_buf + i*8), state[i]);
-
-        for (int i = 0; i < 8; i++) {
-            uint32_t v = state_buf[i * 8 + lane];
+            uint32_t v = state_buf[i][lane];
             digests[lane][4*i]   = (uint8_t)(v >> 24);
             digests[lane][4*i+1] = (uint8_t)(v >> 16);
             digests[lane][4*i+2] = (uint8_t)(v >> 8);
             digests[lane][4*i+3] = (uint8_t)(v);
         }
     }
+    free(padded);
 }
 
 /* ===========================================================================
@@ -425,7 +434,6 @@ static void sm3_compress_avx512(__m512i state[8],
 
     for (int j = 0; j < 64; j++) {
         uint32_t tj = (j < 16) ? T[0] : T[1];
-        __m512i tj_vec  = zmm_set1_epi32(tj);
         __m512i tj_rot  = zmm_set1_epi32(rotl32(tj, j % 32));
         __m512i a12     = zmm_rotl32(A, 12);
 
@@ -453,6 +461,57 @@ static void sm3_compress_avx512(__m512i state[8],
     state[5] = _mm512_xor_si512(state[5], F);
     state[6] = _mm512_xor_si512(state[6], G);
     state[7] = _mm512_xor_si512(state[7], H);
+}
+
+void sm3_hash_avx512_16x(const uint8_t *msgs[16], size_t msglen,
+                         uint8_t digests[16][32]) {
+    size_t padlen = sm3_padded_len(msglen);
+    uint8_t *padded = (uint8_t *)calloc(16, padlen);
+    if (!padded) {
+        for (int lane = 0; lane < 16; lane++)
+            sm3_hash_scalar(msgs[lane], msglen, digests[lane]);
+        return;
+    }
+
+    for (int lane = 0; lane < 16; lane++) {
+        size_t lane_padlen;
+        sm3_pad(msgs[lane], msglen, padded + lane * padlen, &lane_padlen);
+    }
+
+    __m512i state[8];
+    for (int i = 0; i < 8; i++)
+        state[i] = zmm_set1_epi32(IV[i]);
+
+    size_t nblocks = padlen / SM3_BLOCK_SIZE;
+    for (size_t b = 0; b < nblocks; b++) {
+        uint32_t block_words[16][16];
+        for (int lane = 0; lane < 16; lane++) {
+            const uint8_t *block = padded + lane * padlen + b * SM3_BLOCK_SIZE;
+            for (int j = 0; j < 16; j++) {
+                block_words[lane][j] =
+                    ((uint32_t)block[4*j]   << 24) |
+                    ((uint32_t)block[4*j+1] << 16) |
+                    ((uint32_t)block[4*j+2] <<  8) |
+                    ((uint32_t)block[4*j+3]);
+            }
+        }
+        sm3_compress_avx512(state, block_words);
+    }
+
+    uint32_t state_buf[8][16];
+    for (int i = 0; i < 8; i++)
+        _mm512_storeu_si512((void *)state_buf[i], state[i]);
+
+    for (int lane = 0; lane < 16; lane++) {
+        for (int i = 0; i < 8; i++) {
+            uint32_t v = state_buf[i][lane];
+            digests[lane][4*i]   = (uint8_t)(v >> 24);
+            digests[lane][4*i+1] = (uint8_t)(v >> 16);
+            digests[lane][4*i+2] = (uint8_t)(v >> 8);
+            digests[lane][4*i+3] = (uint8_t)(v);
+        }
+    }
+    free(padded);
 }
 
 #endif /* __AVX512F__ */
@@ -504,6 +563,48 @@ int main(void) {
     sm3_hash_scalar(msg, 3, digest);
     printf("SM3(\"abc\") test: %s\n",
            memcmp(digest, expected, 32) == 0 ? "PASS" : "FAIL");
+
+#if defined(__AVX2__)
+    {
+        char msgbuf[8][40];
+        const uint8_t *msgs[8];
+        uint8_t simd_digests[8][32];
+        int ok = 1;
+        for (int lane = 0; lane < 8; lane++) {
+            snprintf(msgbuf[lane], sizeof(msgbuf[lane]),
+                     "sm3-avx2-lane-%02d-fixed-message", lane);
+            msgs[lane] = (const uint8_t *)msgbuf[lane];
+        }
+        sm3_hash_avx2_8x(msgs, strlen(msgbuf[0]), simd_digests);
+        for (int lane = 0; lane < 8; lane++) {
+            uint8_t ref[32];
+            sm3_hash_scalar(msgs[lane], strlen(msgbuf[lane]), ref);
+            ok &= (memcmp(ref, simd_digests[lane], 32) == 0);
+        }
+        printf("AVX2 8-lane multi-buffer test: %s\n", ok ? "PASS" : "FAIL");
+    }
+#endif
+
+#if defined(__AVX512F__)
+    {
+        char msgbuf[16][44];
+        const uint8_t *msgs[16];
+        uint8_t simd_digests[16][32];
+        int ok = 1;
+        for (int lane = 0; lane < 16; lane++) {
+            snprintf(msgbuf[lane], sizeof(msgbuf[lane]),
+                     "sm3-avx512-lane-%02d-fixed-message", lane);
+            msgs[lane] = (const uint8_t *)msgbuf[lane];
+        }
+        sm3_hash_avx512_16x(msgs, strlen(msgbuf[0]), simd_digests);
+        for (int lane = 0; lane < 16; lane++) {
+            uint8_t ref[32];
+            sm3_hash_scalar(msgs[lane], strlen(msgbuf[lane]), ref);
+            ok &= (memcmp(ref, simd_digests[lane], 32) == 0);
+        }
+        printf("AVX512 16-lane multi-buffer test: %s\n", ok ? "PASS" : "FAIL");
+    }
+#endif
 
     /* Benchmark scalar */
     printf("\nSM3 performance benchmark (10000 hashes of 64-byte message):\n");

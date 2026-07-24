@@ -423,11 +423,16 @@ def inc32(counter: int) -> int:
     return (counter & (MASK128 ^ 0xFFFFFFFF)) | low
 
 
-def sm4_ctr_crypt(data: bytes, key: bytes, iv: bytes, transform=sm4_t_table, increment=inc128) -> bytes:
+def sm4_ctr_crypt_with_round_keys(
+    data: bytes,
+    round_keys: list[int],
+    iv: bytes,
+    transform=sm4_t_table,
+    increment=inc128,
+) -> bytes:
     if len(iv) != BLOCK_SIZE:
         raise ValueError("CTR IV must be 16 bytes")
 
-    round_keys = sm4_key_schedule(key)
     counter = int.from_bytes(iv, "big")
     output = bytearray()
     for offset in range(0, len(data), BLOCK_SIZE):
@@ -436,6 +441,10 @@ def sm4_ctr_crypt(data: bytes, key: bytes, iv: bytes, transform=sm4_t_table, inc
         output.extend(xor_bytes(block, keystream[: len(block)]))
         counter = increment(counter)
     return bytes(output)
+
+
+def sm4_ctr_crypt(data: bytes, key: bytes, iv: bytes, transform=sm4_t_table, increment=inc128) -> bytes:
+    return sm4_ctr_crypt_with_round_keys(data, sm4_key_schedule(key), iv, transform, increment)
 
 
 GCM_R = 0xE1000000000000000000000000000000
@@ -511,7 +520,13 @@ def sm4_gcm_encrypt(
     round_keys = sm4_key_schedule(key)
     h = int.from_bytes(sm4_crypt_block(b"\x00" * BLOCK_SIZE, round_keys, transform), "big")
     j0 = gcm_j0(iv, h)
-    ciphertext = sm4_ctr_crypt(plaintext, key, inc32(j0).to_bytes(BLOCK_SIZE, "big"), transform, inc32)
+    ciphertext = sm4_ctr_crypt_with_round_keys(
+        plaintext,
+        round_keys,
+        inc32(j0).to_bytes(BLOCK_SIZE, "big"),
+        transform,
+        inc32,
+    )
     auth_value = ghash(aad, ciphertext, h)
     tag_mask = sm4_crypt_block(j0.to_bytes(BLOCK_SIZE, "big"), round_keys, transform)
     tag = (int.from_bytes(tag_mask, "big") ^ auth_value).to_bytes(BLOCK_SIZE, "big")
@@ -534,7 +549,13 @@ def sm4_gcm_decrypt(
     expected_tag = (int.from_bytes(tag_mask, "big") ^ auth_value).to_bytes(BLOCK_SIZE, "big")
     if not compare_digest(expected_tag, tag):
         raise ValueError("GCM tag verification failed")
-    return sm4_ctr_crypt(ciphertext, key, inc32(j0).to_bytes(BLOCK_SIZE, "big"), transform, inc32)
+    return sm4_ctr_crypt_with_round_keys(
+        ciphertext,
+        round_keys,
+        inc32(j0).to_bytes(BLOCK_SIZE, "big"),
+        transform,
+        inc32,
+    )
 
 
 def xts_mul_alpha(tweak: bytes) -> bytes:
@@ -560,7 +581,7 @@ def sm4_xts_crypt_full_blocks(
     data_round_keys = sm4_key_schedule(data_key)
     if decrypt:
         data_round_keys = list(reversed(data_round_keys))
-    tweak = sm4_encrypt_block(tweak_value, tweak_key, transform)
+    tweak = sm4_crypt_block(tweak_value, sm4_key_schedule(tweak_key), transform)
     output = bytearray()
     for offset in range(0, len(data), BLOCK_SIZE):
         block = data[offset : offset + BLOCK_SIZE]

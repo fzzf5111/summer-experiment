@@ -1,7 +1,8 @@
 # SM3 SIMD Multi-Buffer Implementation Makefile
 # Supports x86-64 (scalar, AVX2, AVX512) and ARM64 (NEON, SM3E)
 
-CC       = gcc
+AARCH64_CC ?= aarch64-linux-gnu-gcc
+CC       ?= gcc
 CFLAGS   = -O3 -std=c11 -Wall -Wextra
 LDFLAGS  =
 
@@ -25,7 +26,7 @@ sm3_x86_avx512: c_optimized/sm3_x86_simd.c
 	$(CC) $(CFLAGS) $(x86_AVX512_FLAGS) $< -o $@ $(LDFLAGS)
 
 sm3_arm_neon: c_optimized/sm3_arm_neon.c
-	$(CC) $(CFLAGS) $(ARM_NEON_FLAGS) $< -o $@ $(LDFLAGS)
+	$(AARCH64_CC) $(CFLAGS) $(ARM_NEON_FLAGS) $< -o $@ $(LDFLAGS)
 
 test: sm3_x86_simd
 	./sm3_x86_simd

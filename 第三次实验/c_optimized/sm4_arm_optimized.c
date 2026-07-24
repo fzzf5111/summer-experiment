@@ -13,6 +13,8 @@
  * Use runtime feature detection (e.g., getauxval(AT_HWCAP2) & HWCAP2_SM4) in production.
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -20,8 +22,6 @@
 
 #ifdef __aarch64__
 #include <arm_neon.h>
-/* SM4 crypto extension intrinsics (ARMv8.4-A) */
-#include <arm_sve.h>  /* or arm_neon.h for SM4E */
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -73,7 +73,8 @@ static uint32_t T0[256], T1[256], T2[256], T3[256];
 static int t_tables_ok = 0;
 
 static inline uint32_t rotl32(uint32_t v, int n) {
-    return (v << n) | (v >> (32 - n));
+    n &= 31;
+    return n ? ((v << n) | (v >> (32 - n))) : v;
 }
 
 static uint32_t sm4_L(uint32_t w) {
@@ -169,7 +170,7 @@ static inline uint8x16_t neon_sbox_apply(uint8x16_t input) {
  * These eliminate software S-box entirely and provide hardware-level
  * resistance to cache-timing attacks while delivering maximum throughput.
  *
- * Intrinsic prototypes (available in arm_neon.h / arm_sve.h):
+ * Intrinsic prototypes (available through compiler ACLE headers):
  *   uint32x4_t vsm4eq_u32(uint32x4_t state, uint32x4_t rk);
  *   uint32x4_t vsm4ekeyq_u32(uint32x4_t rk_prev, uint32x4_t rk_next);
  * =========================================================================== */
@@ -237,7 +238,7 @@ static void sm4_key_schedule(const uint8_t key[16], uint32_t rk[32]) {
 
 static void sm4_t_table_encrypt(const uint8_t in[16], uint8_t out[16],
                                 const uint32_t rk[32]) {
-    uint32_t x3, x2, x1, x0;
+    uint32_t x0, x1, x2, x3;
     x0 = ((uint32_t)in[0]  << 24) | ((uint32_t)in[1]  << 16) |
          ((uint32_t)in[2]  <<  8) | ((uint32_t)in[3]);
     x1 = ((uint32_t)in[4]  << 24) | ((uint32_t)in[5]  << 16) |
@@ -248,21 +249,24 @@ static void sm4_t_table_encrypt(const uint8_t in[16], uint8_t out[16],
          ((uint32_t)in[14] <<  8) | ((uint32_t)in[15]);
 
     for (int i = 0; i < 32; i++) {
-        uint32_t t = x0 ^ x1 ^ x2 ^ rk[i];
-        x3 ^= T0[(t >> 24) & 0xFF] ^ T1[(t >> 16) & 0xFF] ^
+        uint32_t t = x1 ^ x2 ^ x3 ^ rk[i];
+        x0 ^= T0[(t >> 24) & 0xFF] ^ T1[(t >> 16) & 0xFF] ^
               T2[(t >>  8) & 0xFF] ^ T3[ t        & 0xFF];
-        /* Rotate */
-        uint32_t nx = x3; x3 = x2; x2 = x1; x1 = x0; x0 = nx;
+        uint32_t nx = x0;
+        x0 = x1;
+        x1 = x2;
+        x2 = x3;
+        x3 = nx;
     }
 
-    out[0]  = (uint8_t)(x0 >> 24); out[1]  = (uint8_t)(x0 >> 16);
-    out[2]  = (uint8_t)(x0 >>  8); out[3]  = (uint8_t)(x0);
-    out[4]  = (uint8_t)(x1 >> 24); out[5]  = (uint8_t)(x1 >> 16);
-    out[6]  = (uint8_t)(x1 >>  8); out[7]  = (uint8_t)(x1);
-    out[8]  = (uint8_t)(x2 >> 24); out[9]  = (uint8_t)(x2 >> 16);
-    out[10] = (uint8_t)(x2 >>  8); out[11] = (uint8_t)(x2);
-    out[12] = (uint8_t)(x3 >> 24); out[13] = (uint8_t)(x3 >> 16);
-    out[14] = (uint8_t)(x3 >>  8); out[15] = (uint8_t)(x3);
+    out[0]  = (uint8_t)(x3 >> 24); out[1]  = (uint8_t)(x3 >> 16);
+    out[2]  = (uint8_t)(x3 >>  8); out[3]  = (uint8_t)(x3);
+    out[4]  = (uint8_t)(x2 >> 24); out[5]  = (uint8_t)(x2 >> 16);
+    out[6]  = (uint8_t)(x2 >>  8); out[7]  = (uint8_t)(x2);
+    out[8]  = (uint8_t)(x1 >> 24); out[9]  = (uint8_t)(x1 >> 16);
+    out[10] = (uint8_t)(x1 >>  8); out[11] = (uint8_t)(x1);
+    out[12] = (uint8_t)(x0 >> 24); out[13] = (uint8_t)(x0 >> 16);
+    out[14] = (uint8_t)(x0 >>  8); out[15] = (uint8_t)(x0);
 }
 
 /* ===========================================================================
@@ -272,7 +276,7 @@ static void sm4_t_table_encrypt(const uint8_t in[16], uint8_t out[16],
  * They perform 64-bit × 64-bit → 128-bit carry-less multiply in GF(2).
  * =========================================================================== */
 
-#ifdef __aarch64__
+#if defined(__aarch64__) && defined(__ARM_FEATURE_CRYPTO)
 
 static void ghash_pmull(uint8x16_t *state, uint8x16_t h, uint8x16_t block) {
     uint8x16_t tmp = veorq_u8(*state, block);
@@ -294,14 +298,17 @@ static void ghash_pmull(uint8x16_t *state, uint8x16_t h, uint8x16_t block) {
     poly128_t z1 = vmull_p64(lo_a, hi_b);
     poly128_t z2 = vmull_p64(hi_a, lo_b);
     poly128_t z3 = vmull_p64(hi_a, hi_b);
+    (void)z1;
+    (void)z2;
+    (void)z3;
 
-    /* Combine with reduction (simplified) */
-    /* Production code follows the same Karatsuba + reduction pattern
-     * as the x86 PCLMULQDQ version. */
-    *state = vreinterpretq_u8_p128(z0); /* placeholder */
+    /* This sample stores the low product to show the PMULL data path.
+     * A complete GCM backend combines z0..z3 and performs reduction with
+     * x^128 + x^7 + x^2 + x + 1, as implemented in the Python model. */
+    *state = vreinterpretq_u8_p128(z0);
 }
 
-#endif /* __aarch64__ */
+#endif /* __aarch64__ && __ARM_FEATURE_CRYPTO */
 
 /* ===========================================================================
  * Self-test and benchmark
@@ -358,14 +365,17 @@ int main(void) {
     const int N = 100000;
     uint8_t bench_pt[16] = {0};
     uint8_t bench_ct[16];
+    unsigned checksum = 0;
     double start = get_time_sec();
     for (int i = 0; i < N; i++) {
         bench_pt[0] = (uint8_t)i;
         sm4_t_table_encrypt(bench_pt, bench_ct, rk);
+        checksum ^= bench_ct[0];
     }
     double elapsed = get_time_sec() - start;
     double mib = (double)(N * 16) / (1024.0 * 1024.0);
-    printf("  T-table: %.4f s,  %.2f MiB/s\n", elapsed, mib / elapsed);
+    printf("  T-table: %.4f s,  %.2f MiB/s, checksum=%02x\n",
+           elapsed, mib / elapsed, checksum & 0xFF);
 
     return 0;
 }

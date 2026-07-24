@@ -13,6 +13,8 @@
  *   gcc -O3 -march=armv8-a+sm3+simd -std=c11 sm3_arm_neon.c -o sm3_arm_neon
  */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -41,7 +43,14 @@ static const uint32_t T[2] = { 0x79CC4519, 0x7A879D8A };
  * =========================================================================== */
 
 static inline uint32_t rotl32(uint32_t v, int n) {
-    return (v << n) | (v >> (32 - n));
+    n &= 31;
+    return n ? ((v << n) | (v >> (32 - n))) : v;
+}
+
+static size_t sm3_padded_len(size_t msglen) {
+    size_t padlen = msglen + 1;
+    while ((padlen % SM3_BLOCK_SIZE) != 56) padlen++;
+    return padlen + 8;
 }
 
 static uint32_t sm3_p0(uint32_t x) {
@@ -64,9 +73,7 @@ static uint32_t sm3_gg(uint32_t x, uint32_t y, uint32_t z, int j) {
 
 static void sm3_pad(const uint8_t *msg, size_t msglen,
                     uint8_t *padded, size_t *padlen) {
-    *padlen = msglen + 1;
-    while ((*padlen % SM3_BLOCK_SIZE) != 56) (*padlen)++;
-    *padlen += 8;
+    *padlen = sm3_padded_len(msglen);
 
     memcpy(padded, msg, msglen);
     padded[msglen] = 0x80;
@@ -108,8 +115,12 @@ static void sm3_compress_scalar(uint32_t state[8], const uint8_t block[64]) {
 }
 
 void sm3_hash_scalar(const uint8_t *msg, size_t msglen, uint8_t digest[32]) {
-    uint8_t padded[SM3_BLOCK_SIZE * 32];
-    size_t padlen;
+    size_t padlen = sm3_padded_len(msglen);
+    uint8_t *padded = (uint8_t *)malloc(padlen);
+    if (!padded) {
+        memset(digest, 0, SM3_DIGEST_SIZE);
+        return;
+    }
     sm3_pad(msg, msglen, padded, &padlen);
 
     uint32_t state[8];
@@ -124,6 +135,7 @@ void sm3_hash_scalar(const uint8_t *msg, size_t msglen, uint8_t digest[32]) {
         digest[4*i+2] = (uint8_t)(state[i] >> 8);
         digest[4*i+3] = (uint8_t)(state[i]);
     }
+    free(padded);
 }
 
 /* ===========================================================================
@@ -267,12 +279,18 @@ static void sm3_compress_neon(uint32x4_t state[8],
  */
 void sm3_hash_neon_4x(const uint8_t *msgs[4], size_t msglen,
                       uint8_t digests[4][32]) {
-    uint8_t padded[4][SM3_BLOCK_SIZE * 32];
-    size_t padlen;
-    sm3_pad(msgs[0], msglen, padded[0], &padlen);
+    size_t padlen = sm3_padded_len(msglen);
+    uint8_t *padded = (uint8_t *)calloc(4, padlen);
+    if (!padded) {
+        for (int lane = 0; lane < 4; lane++)
+            sm3_hash_scalar(msgs[lane], msglen, digests[lane]);
+        return;
+    }
 
-    for (int lane = 0; lane < 4; lane++)
-        sm3_pad(msgs[lane], msglen, padded[lane], &padlen);
+    for (int lane = 0; lane < 4; lane++) {
+        size_t lane_padlen;
+        sm3_pad(msgs[lane], msglen, padded + lane * padlen, &lane_padlen);
+    }
 
     /* Initialize state: each NEON reg has IV broadcast to 4 lanes */
     uint32x4_t state[8];
@@ -283,7 +301,7 @@ void sm3_hash_neon_4x(const uint8_t *msgs[4], size_t msglen,
     for (size_t b = 0; b < nblocks; b++) {
         uint32_t block_words[4][16];
         for (int lane = 0; lane < 4; lane++) {
-            const uint8_t *block = padded[lane] + b * SM3_BLOCK_SIZE;
+            const uint8_t *block = padded + lane * padlen + b * SM3_BLOCK_SIZE;
             for (int j = 0; j < 16; j++) {
                 block_words[lane][j] =
                     ((uint32_t)block[4*j]   << 24) |
@@ -309,6 +327,7 @@ void sm3_hash_neon_4x(const uint8_t *msgs[4], size_t msglen,
             digests[lane][4*i+3] = (uint8_t)(v);
         }
     }
+    free(padded);
 }
 
 /* ===========================================================================
@@ -389,6 +408,27 @@ int main(void) {
     sm3_hash_scalar(msg, 3, digest);
     printf("SM3(\"abc\") test: %s\n",
            memcmp(digest, expected, 32) == 0 ? "PASS" : "FAIL");
+
+#if defined(__aarch64__)
+    {
+        char msgbuf[4][40];
+        const uint8_t *msgs[4];
+        uint8_t simd_digests[4][32];
+        int ok = 1;
+        for (int lane = 0; lane < 4; lane++) {
+            snprintf(msgbuf[lane], sizeof(msgbuf[lane]),
+                     "sm3-neon-lane-%02d-fixed-message", lane);
+            msgs[lane] = (const uint8_t *)msgbuf[lane];
+        }
+        sm3_hash_neon_4x(msgs, strlen(msgbuf[0]), simd_digests);
+        for (int lane = 0; lane < 4; lane++) {
+            uint8_t ref[32];
+            sm3_hash_scalar(msgs[lane], strlen(msgbuf[lane]), ref);
+            ok &= (memcmp(ref, simd_digests[lane], 32) == 0);
+        }
+        printf("NEON 4-lane multi-buffer test: %s\n", ok ? "PASS" : "FAIL");
+    }
+#endif
 
     /* Benchmark */
     printf("\nSM3 scalar benchmark (10000 hashes of 64-byte message):\n");

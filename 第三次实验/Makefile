@@ -1,7 +1,8 @@
 # SM4 Optimized Implementation Makefile
 # Supports x86-64 (T-table, SSSE3, AVX2, PCLMUL) and ARM64 (NEON, SM4E)
 
-CC       = gcc
+AARCH64_CC ?= aarch64-linux-gnu-gcc
+CC       ?= gcc
 CFLAGS   = -O3 -std=c11 -Wall -Wextra
 LDFLAGS  =
 
@@ -22,7 +23,7 @@ sm4_x86_optimized: c_optimized/sm4_x86_optimized.c
 	$(CC) $(CFLAGS) $(x86_avx2_FLAGS) $< -o $@ $(LDFLAGS)
 
 sm4_arm_optimized: c_optimized/sm4_arm_optimized.c
-	$(CC) $(CFLAGS) $(ARM_NEON_FLAGS) $< -o $@ $(LDFLAGS)
+	$(AARCH64_CC) $(CFLAGS) $(ARM_NEON_FLAGS) $< -o $@ $(LDFLAGS)
 
 test: sm4_x86_optimized
 	./sm4_x86_optimized
