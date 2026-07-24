@@ -138,6 +138,23 @@ cd 第五次实验
 make run
 ```
 
+如果重新克隆仓库后没有 `.local` 目录，可以先安装 Microsoft SEAL 4.1.2：
+
+```bash
+git clone --depth 1 --branch v4.1.2 https://github.com/microsoft/SEAL.git /tmp/microsoft-seal
+cmake -S /tmp/microsoft-seal -B /tmp/microsoft-seal-build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/mnt/e/暑期实验课/.local \
+  -DSEAL_BUILD_TESTS=OFF \
+  -DSEAL_BUILD_EXAMPLES=OFF \
+  -DSEAL_BUILD_BENCH=OFF \
+  -DSEAL_USE_ZLIB=OFF \
+  -DSEAL_USE_ZSTD=OFF \
+  -DSEAL_USE_INTEL_HEXL=OFF
+cmake --build /tmp/microsoft-seal-build --config Release -j2
+cmake --install /tmp/microsoft-seal-build --config Release
+```
+
 也可以手动构建：
 
 ```bash
