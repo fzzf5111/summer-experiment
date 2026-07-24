@@ -295,11 +295,40 @@ XTS 的数据块加密彼此只依赖 tweak 序列。实际优化时可以先批
 
 ## 代码实现
 
-本目录提供一个可直接运行的脚本：
+本目录提供两类实现，覆盖 T-table、shuffle、最新指令集三种优化方法：
 
-```text
+### Python 算法模型
+
+可直接运行验证算法正确性：
+
+```bash
 python3 sm4_modes_optimization_demo.py
 ```
+
+### C 优化实现（真机 intrinsic）
+
+| 文件 | 目标架构 | 优化方法 | 编译命令 |
+|------|---------|---------|--------|
+| `c_optimized/sm4_x86_optimized.c` | x86-64 | T-table + SSSE3 shuffle + AVX2/PCLMUL | `make sm4_x86_optimized` |
+| `c_optimized/sm4_arm_optimized.c` | ARM64 | T-table + NEON TBL shuffle + SM4E | `make sm4_arm_optimized` |
+
+编译要求：
+
+```bash
+# x86-64 (需支持 SSSE3 + AVX2 + PCLMUL)
+cd 第三次实验 && make sm4_x86_optimized && ./sm4_x86_optimized
+
+# ARM64 (需 NEON，可选 SM4E)
+cd 第三次实验 && make sm4_arm_optimized && ./sm4_arm_optimized
+```
+
+C 代码中三条优化路径的真实指令映射：
+
+| 优化方法 | x86-64 指令 | ARM64 指令 |
+|---------|------------|----------|
+| T-table | 标量查表 (MOV + XOR) | 标量查表 (LDR + EOR) |
+| Shuffle | `VPSHUFB` (SSSE3), `VPSHUFB` (AVX2) | `TBL`/`TBX` (NEON) |
+| 最新指令集 | `VPCLMULQDQ` (GHASH), `VAESENC` (AES) | `SM4E`/`SM4EKEY`, `PMULL` (GHASH) |
 
 脚本内容包括：
 

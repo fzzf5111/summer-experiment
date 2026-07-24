@@ -1,2 +1,27 @@
+# Compiled binaries
+*.o
+*.obj
+*.exe
+sm4_x86_optimized
+sm4_arm_optimized
+sm3_x86_simd
+sm3_x86_avx512
+sm3_arm_neon
+
+# Python
 __pycache__/
-*.py[cod]
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

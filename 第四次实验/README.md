@@ -236,11 +236,49 @@ __m512i A, B, C, D, E, F, G, H;
 
 ## 代码实现
 
-本目录提供一个可直接运行的脚本：
+本目录提供两类实现，覆盖 ARM64 NEON 和 x86 AVX2/AVX512 两种架构：
 
-```text
+### Python 算法模型
+
+可直接运行验证 multi-buffer 并行数据流的正确性：
+
+```bash
 python3 sm3_simd_hybrid_demo.py
 ```
+
+### C SIMD 优化实现（真机 intrinsic）
+
+| 文件 | 目标架构 | 并行 lane 数 | 编译命令 |
+|------|---------|-------------|--------|
+| `c_optimized/sm3_x86_simd.c` | x86 AVX2 (256-bit YMM) | 8 lanes | `make sm3_x86_simd` |
+| `c_optimized/sm3_x86_simd.c` | x86 AVX512 (512-bit ZMM) | 16 lanes | `make sm3_x86_avx512` |
+| `c_optimized/sm3_arm_neon.c` | ARM64 NEON (128-bit Q) | 4 lanes | `make sm3_arm_neon` |
+
+编译要求：
+
+```bash
+# x86 AVX2 (8 messages parallel)
+cd 第四次实验 && make sm3_x86_simd && ./sm3_x86_simd
+
+# x86 AVX512 (16 messages parallel, 含 VPTERNLOGD + VPROLD)
+cd 第四次实验 && make sm3_x86_avx512 && ./sm3_x86_avx512
+
+# ARM64 NEON (4 messages parallel, 可选 SM3E 硬件扩展)
+cd 第四次实验 && make sm3_arm_neon && ./sm3_arm_neon
+```
+
+C 代码中的关键指令映射：
+
+| 操作 | x86 AVX2 | x86 AVX512 | ARM64 NEON |
+|------|---------|-----------|----------|
+| XOR | `VPXOR` | `VPXORD` | `VEOR` |
+| AND | `VPAND` | `VPANDD` | `VAND` |
+| OR | `VPOR` | `VPORD` | `VORR` |
+| NOT-AND | `VPANDN` | `VPANDND` | `VBIC` |
+| ADD | `VPADDD` | `VPADDD` | `VADD.I32` |
+| ROTL | `VPSLLD+VPSRLD+VPOR` | `VPROLD` (单指令!) | `VSHL+VSHR+VORR` |
+| FF/GG (j≥16) | `VPAND+VPOR`×2 | `VPTERNLOGD` (单指令!) | `VAND+VBIC+VORR` |
+| SM3 专用 | — | — | `SM3SS1/SM3TT1A/SM3TT2A` (可选) |
 
 主要函数包括：
 
