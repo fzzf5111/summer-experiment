@@ -6,15 +6,9 @@
 
 ## 实验选择
 
-本实验选择 [TenSEAL](https://github.com/OpenMined/TenSEAL) 作为开源全同态加密库。TenSEAL 基于 Microsoft SEAL，提供 CKKS/BFV 等同态加密能力，并支持 Python 接口，适合用来验证小规模神经网络算子中的密文线性运算。
+本实验采用 Microsoft SEAL 4.1.2。SEAL 是开源 CPU 全同态加密库，支持 BFV、BGV、CKKS 等方案。本题的输入和卷积核都是整数，卷积只需要“密文加法、密文槽位旋转、密文乘明文权重”，因此选择 BFV batching 可以得到精确整数结果。
 
-卷积算子只包含乘以明文卷积核和累加，因此使用 CKKS 的 SIMD 槽位即可完成：
-
-```text
-密文输入槽位  ->  乘明文权重  ->  旋转对齐  ->  累加得到密文输出
-```
-
-由于本机环境缺少 `pip` 和 `venv`，且无法通过 `sudo` 安装依赖，代码中同时提供了一个同接口的槽位模拟后端。模拟后端不替代 TenSEAL 的安全性，只用于在无依赖环境下验证打包、旋转、明文乘法、累加这些同态数据流是否正确。安装 TenSEAL 后可直接切换到真实密文后端。
+本地已从源码构建 SEAL，并安装到仓库本地 `.local` 目录。`.local` 是依赖安装目录，不提交到 GitHub；实验代码通过 CMake 的 `find_package(SEAL 4.1 REQUIRED)` 链接该库。
 
 ## 卷积参数
 
@@ -45,7 +39,7 @@
 
 ## 明文基准结果
 
-对左上角窗口的计算为：
+左上角窗口：
 
 ```text
 1*1 + 2*2 + 3*3
@@ -61,66 +55,122 @@
  [528, 573]]
 ```
 
-## 实现方法
-
-代码文件为：
+## 代码结构
 
 ```text
 第五次实验/
-├── readme.md
+├── CMakeLists.txt
+├── Makefile
 ├── fhe_conv2d_tenseal.py
-└── requirements.txt
+├── readme.md
+├── requirements.txt
+└── seal_bfv_conv2d.cpp
 ```
 
-实现包含两条路径：
+`seal_bfv_conv2d.cpp` 是本次实验实际验证的 Microsoft SEAL/BFV 实现。`fhe_conv2d_tenseal.py` 是 TenSEAL 版本的 Python 实现，当前系统 Python 为 3.14，TenSEAL 暂无匹配 wheel，因此保留为可选路径。
 
-1. `--backend tenseal`：使用 TenSEAL 的 CKKS/im2col 接口执行真实密文卷积。
-2. `--backend mock`：使用本地槽位模型模拟密文对象，验证卷积的数据布局和同态操作序列。
+## SEAL 参数
 
-默认 `--backend auto` 会优先尝试 TenSEAL，若未安装则自动退回模拟后端。
-
-运行方式：
-
-```bash
-python3 第五次实验/fhe_conv2d_tenseal.py
-```
-
-安装 TenSEAL 后运行真实后端：
-
-```bash
-python3 -m pip install -r 第五次实验/requirements.txt
-python3 第五次实验/fhe_conv2d_tenseal.py --backend tenseal
-```
-
-## 打包方式
-
-本实验采用 im2col 打包。4 个 `3x3` 滑动窗口分别放入 4 个槽位块，每个块长度取 16，前 9 个槽位保存窗口元素，其余槽位补 0：
+C++ 实现使用 BFV：
 
 ```text
-block 0: input[0:3, 0:3]
-block 1: input[0:3, 1:4]
-block 2: input[1:4, 0:3]
-block 3: input[1:4, 1:4]
+scheme              BFV
+poly_modulus_degree 8192
+coeff_modulus       BFVDefault(8192)
+plain_modulus       PlainModulus::Batching(8192, 20)
 ```
 
-卷积核按同样顺序重复到每个块中。密文槽位与明文权重逐槽相乘后，每个块内前 9 个槽位就是对应窗口的 9 个乘积项。随后用旋转和累加把每个块的 9 个乘积累加到块首槽位。
+`BatchEncoder` 允许把多个整数打包到同一个密文的 SIMD 槽位中。加密后，卷积过程始终在密文对象上完成，只有最后为了验证才解密并解码输出槽位。
 
-## 正确性验证
+## 实现方法一：行主序直接打包
 
-本机运行结果：
+第一种实现把 `4x4` 输入按行主序放入槽位：
 
 ```text
-backend: mock
+slot 0..15 = input[0][0], input[0][1], ..., input[3][3]
+```
+
+输出保存在每个 `3x3` 窗口左上角对应槽位，即：
+
+```text
+0, 1, 4, 5
+```
+
+卷积核的 9 个位置相对左上角槽位的偏移为：
+
+```text
+0, 1, 2,
+4, 5, 6,
+8, 9, 10
+```
+
+偏移 0 不需要旋转，其余 8 个偏移分别执行一次 `Evaluator::rotate_rows`。每次旋转后使用明文 mask 只保留输出槽位，再乘以对应卷积核权重，最后把 9 个密文项累加。
+
+## 实现方法二：im2col 打包
+
+第二种实现把每个滑动窗口提前打包成一个槽位块。共有 4 个输出窗口，每个块长度为 16，前 9 个槽位保存窗口元素，后 7 个槽位补 0：
+
+```text
+block 0: output[0][0] 对应的 3x3 窗口
+block 1: output[0][1] 对应的 3x3 窗口
+block 2: output[1][0] 对应的 3x3 窗口
+block 3: output[1][1] 对应的 3x3 窗口
+```
+
+密文乘以重复的卷积核明文 mask 后，每个块内前 9 个槽位就是 9 个乘积项。随后执行树形旋转累加：
+
+```text
+acc = products
+acc = acc + rotate(acc, 1)
+acc = acc + rotate(acc, 2)
+acc = acc + rotate(acc, 4)
+acc = acc + rotate(acc, 8)
+```
+
+每个块首槽位最终保存对应输出值。
+
+## 构建与运行
+
+如果已经安装 SEAL 到仓库 `.local`：
+
+```bash
+cd 第五次实验
+make run
+```
+
+也可以手动构建：
+
+```bash
+cmake -S 第五次实验 -B /tmp/exp5-seal-build -DCMAKE_PREFIX_PATH=/mnt/e/暑期实验课/.local
+cmake --build /tmp/exp5-seal-build
+/tmp/exp5-seal-build/seal_bfv_conv2d
+```
+
+## 运行结果
+
+本机真实 SEAL/BFV 运行结果：
+
+```text
 plain convolution:
-[[348.0, 393.0], [528.0, 573.0]]
-encrypted convolution decrypted:
-[[348.0, 393.0], [528.0, 573.0]]
-max absolute error: 0.000000
+[[348, 393], [528, 573]]
+SEAL BFV direct row-major decrypted:
+[[348, 393], [528, 573]]
+direct row-major rotations: 8
+SEAL BFV im2col decrypted:
+[[348, 393], [528, 573]]
+im2col rotations: 4
+direct row-major theoretical minimum: 8
+im2col theoretical minimum: 4
 verification: PASS
 ```
 
-若使用 TenSEAL/CKKS 后端，解密结果可能出现极小浮点误差，代码使用 `1e-3` 作为默认容忍度。
-
 ## 实验结论
 
-卷积是线性算子，因此适合用 SIMD 槽位上的同态明文乘法和同态加法实现。对本题的 `4x4` 输入和 `3x3` 卷积核，im2col 打包后每个输出窗口对应 9 个乘积项，同态计算只需要在密文上做逐槽明文乘法、旋转和加法，最后解密得到的 `2x2` 输出与明文卷积完全一致。
+本实验使用 Microsoft SEAL 的 BFV batching 实现了 `4x4` 输入与 `3x3` 卷积核的密文卷积。两种打包方式解密后都得到：
+
+```text
+[[348, 393],
+ [528, 573]]
+```
+
+与明文卷积完全一致。说明在卷积核为明文权重、输入为密文的场景下，可以通过“打包、旋转、明文乘法、累加”在密文域中正确完成卷积计算。

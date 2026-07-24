@@ -86,10 +86,19 @@ r >= ceil(log2(9)) = 4
 └── rotation_minimum_analysis.py
 ```
 
+第五次实验中的 `seal_bfv_conv2d.cpp` 也用 Microsoft SEAL/BFV 实际执行了这两种打包策略，并打印真实同态旋转次数；本目录脚本负责把同一结论以更直接的槽位模型展开说明。
+
 运行方式：
 
 ```bash
 python3 第六次实验/rotation_minimum_analysis.py
+```
+
+也可以运行第五次实验的真实 SEAL 程序：
+
+```bash
+cd 第五次实验
+make run
 ```
 
 ## 本机运行结果
