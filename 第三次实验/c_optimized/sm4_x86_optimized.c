@@ -21,11 +21,22 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#ifdef __x86_64__
-#include <wmmintrin.h>  /* AES-NI, PCLMULQDQ */
-#include <smmintrin.h>  /* SSE4.1 */
-#include <tmmintrin.h>  /* SSSE3 */
-#include <immintrin.h>  /* AVX, AVX2 */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define SM4_X86_TARGET 1
+#include <immintrin.h>
+#if defined(__SSSE3__) || (defined(_MSC_VER) && (defined(__AVX__) || defined(__AVX2__)))
+#define SM4_HAVE_SSSE3 1
+#endif
+#if defined(__PCLMUL__) || (defined(_MSC_VER) && (defined(__AVX__) || defined(__AVX2__)))
+#define SM4_HAVE_PCLMUL 1
+#endif
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -163,7 +174,7 @@ static void sm4_key_schedule(const uint8_t key[16], uint32_t rk[32]) {
  * table addresses in the S-box layer.
  * =========================================================================== */
 
-#ifdef __x86_64__
+#if defined(SM4_HAVE_SSSE3)
 
 /* Pre-built rows for nibble-based SM4 S-box: row[hi][lo] = SBOX[hi||lo]. */
 static __m128i shuffle_rows[16];
@@ -248,7 +259,7 @@ static void sm4_shuffle_encrypt(const uint8_t in[16], uint8_t out[16],
     out[14] = (uint8_t)(x0 >>  8); out[15] = (uint8_t)(x0);
 }
 
-#endif /* __x86_64__ */
+#endif /* SM4_HAVE_SSSE3 */
 
 /* ===========================================================================
  * Method 3: AVX2-oriented 8-block CTR layout
@@ -257,8 +268,6 @@ static void sm4_shuffle_encrypt(const uint8_t in[16], uint8_t out[16],
  * compact file keeps the SM4 core on the T-table path and documents where an
  * AVX2/AVX-512 round function is plugged in.
  * =========================================================================== */
-
-#ifdef __x86_64__
 
 /* Encrypt batches of 8 CTR blocks; the caller can replace the core with AVX2. */
 static void sm4_ctr_8x_avx2(const uint8_t *in, uint8_t *out, size_t nblocks_8x,
@@ -289,15 +298,17 @@ static void sm4_ctr_8x_avx2(const uint8_t *in, uint8_t *out, size_t nblocks_8x,
  *   VPCLMULQDQ does GF(2^128) multiplication in hardware.
  * =========================================================================== */
 
+#if defined(SM4_HAVE_PCLMUL)
+
 /* Multiply two 128-bit values in GF(2^128) using PCLMULQDQ */
 static void ghash_clmul(__m128i *state, __m128i h, __m128i block) {
     __m128i tmp = _mm_xor_si128(*state, block);
 
     /* Karatsuba: H = H1*X^64 + H0,  X = X1*X^64 + X0
-     * PCLMULQDQ(a, b, 0x00) → a0*b0
-     * PCLMULQDQ(a, b, 0x01) → a1*b0
-     * PCLMULQDQ(a, b, 0x10) → a0*b1
-     * PCLMULQDQ(a, b, 0x11) → a1*b1
+     * PCLMULQDQ(a, b, 0x00) -> a0*b0
+     * PCLMULQDQ(a, b, 0x01) -> a1*b0
+     * PCLMULQDQ(a, b, 0x10) -> a0*b1
+     * PCLMULQDQ(a, b, 0x11) -> a1*b1
      */
     __m128i xmm0 = _mm_clmulepi64_si128(tmp, h, 0x00);  /* lo*lo */
     __m128i xmm1 = _mm_clmulepi64_si128(tmp, h, 0x10);  /* lo*hi */
@@ -316,7 +327,7 @@ static void ghash_clmul(__m128i *state, __m128i h, __m128i block) {
     *state = reduced;
 }
 
-#endif /* __x86_64__ */
+#endif /* SM4_HAVE_PCLMUL */
 
 /* ===========================================================================
  * XTS mode (GF(2^128) tweak multiplication)
@@ -337,7 +348,7 @@ static void xts_mul_alpha(uint8_t tweak[16]) {
 
 static void test_vector(void) {
     init_t_tables();
-#ifdef __x86_64__
+#if defined(SM4_HAVE_SSSE3)
     init_shuffle_tables();
 #endif
 
@@ -356,7 +367,7 @@ static void test_vector(void) {
     printf("SM4 T-table test vector:  %s\n",
            memcmp(cipher, expected, 16) == 0 ? "PASS" : "FAIL");
 
-#ifdef __x86_64__
+#if defined(SM4_HAVE_SSSE3)
     sm4_shuffle_encrypt(plain, cipher, rk);
     printf("SM4 PSHUFB test vector:   %s\n",
            memcmp(cipher, expected, 16) == 0 ? "PASS" : "FAIL");
@@ -386,13 +397,14 @@ static void test_vector(void) {
     printf("XTS alpha update:         %s\n",
            tweak[15] == 2 ? "PASS" : "FAIL");
 
-#ifdef __x86_64__
+#if defined(SM4_HAVE_PCLMUL)
     __m128i gh_state = _mm_setzero_si128();
     ghash_clmul(&gh_state, _mm_setzero_si128(), _mm_setzero_si128());
     uint8_t gh_out[16];
+    uint8_t gh_zero[16] = {0};
     _mm_storeu_si128((__m128i *)gh_out, gh_state);
     printf("PCLMUL GHASH zero test:   %s\n",
-           memcmp(gh_out, (uint8_t[16]){0}, 16) == 0 ? "PASS" : "FAIL");
+           memcmp(gh_out, gh_zero, 16) == 0 ? "PASS" : "FAIL");
 #endif
 }
 
@@ -400,12 +412,22 @@ static void test_vector(void) {
  * Performance benchmark
  * =========================================================================== */
 
-#include <time.h>
-
 static double get_time_sec(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int initialized = 0;
+    LARGE_INTEGER counter;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        initialized = 1;
+    }
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
 }
 
 static void benchmark(void) {
@@ -430,11 +452,19 @@ static void benchmark(void) {
     printf("  T-table scalar:  %.4f s,  %.2f MiB/s, checksum=%02x\n",
            elapsed, mib / elapsed, checksum & 0xFF);
 
-#ifdef __x86_64__
+#if defined(SM4_X86_TARGET)
     printf("  x86 optimization paths available:\n");
+#if defined(SM4_HAVE_SSSE3)
     printf("    - SSSE3 VPSHUFB for constant-time S-box\n");
+#else
+    printf("    - SSSE3 VPSHUFB path requires /arch:AVX2 or -mssse3\n");
+#endif
     printf("    - AVX2 8-block parallel CTR\n");
+#if defined(SM4_HAVE_PCLMUL)
     printf("    - PCLMULQDQ for GHASH in GCM mode\n");
+#else
+    printf("    - PCLMULQDQ path requires /arch:AVX2 or -mpclmul\n");
+#endif
     printf("    - VAES for AES-based modes (analogous to SM4 operations)\n");
 #endif
 }

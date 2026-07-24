@@ -20,8 +20,23 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#ifdef __aarch64__
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define SM3_ARM64_TARGET 1
+#endif
+
+#if defined(SM3_ARM64_TARGET)
+#if defined(_MSC_VER)
+#include <arm64_neon.h>
+#else
 #include <arm_neon.h>
+#endif
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -160,7 +175,7 @@ void sm3_hash_scalar(const uint8_t *msg, size_t msglen, uint8_t digest[32]) {
  *   → Production code computes W[j] on-the-fly
  * =========================================================================== */
 
-#ifdef __aarch64__
+#if defined(SM3_ARM64_TARGET)
 
 /* Broadcast a 32-bit scalar to all 4 lanes */
 static inline uint32x4_t neon_set1_epi32(uint32_t v) {
@@ -215,10 +230,11 @@ static void sm3_compress_neon(uint32x4_t state[8],
     uint32x4_t w[68], w1[64];
 
     for (int j = 0; j < 16; j++) {
-        w[j] = vld1q_u32((const uint32_t[]){
+        const uint32_t vals[4] = {
             block_words[0][j], block_words[1][j],
             block_words[2][j], block_words[3][j]
-        });
+        };
+        w[j] = vld1q_u32(vals);
     }
 
     /* Message expansion */
@@ -368,24 +384,34 @@ static void sm3_compress_sm3e(uint32x4_t state[8],
 
 #endif /* SM3 crypto extension */
 
-#endif /* __aarch64__ */
+#endif /* SM3_ARM64_TARGET */
 
 /* ===========================================================================
  * Self-test and benchmark
  * =========================================================================== */
 
-#include <time.h>
-
 static double get_time_sec(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int initialized = 0;
+    LARGE_INTEGER counter;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        initialized = 1;
+    }
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
 }
 
 int main(void) {
     printf("=== SM3 ARM64 NEON Multi-Buffer Implementation ===\n\n");
 
-#if defined(__aarch64__)
+#if defined(SM3_ARM64_TARGET)
     printf("Architecture: ARM64 with NEON (4 lanes × 32-bit, 128-bit Q registers)\n");
 #else
     printf("Architecture: generic (scalar only)\n");
@@ -409,7 +435,7 @@ int main(void) {
     printf("SM3(\"abc\") test: %s\n",
            memcmp(digest, expected, 32) == 0 ? "PASS" : "FAIL");
 
-#if defined(__aarch64__)
+#if defined(SM3_ARM64_TARGET)
     {
         char msgbuf[4][40];
         const uint8_t *msgs[4];
@@ -445,7 +471,7 @@ int main(void) {
     double mib = (double)(N * 64) / (1024.0 * 1024.0);
     printf("  Scalar: %.4f s,  %.2f MiB/s\n", elapsed, mib / elapsed);
 
-#if defined(__aarch64__)
+#if defined(SM3_ARM64_TARGET)
     printf("\nNEON optimization paths:\n");
     printf("  SM3 P0/P1:    VEOR + VSHL + VSHR (rotate-left via 2 shifts)\n");
     printf("  SM3 FF (j<16): VEOR chain (3-way XOR)\n");

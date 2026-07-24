@@ -20,8 +20,23 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#ifdef __aarch64__
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+#if defined(__aarch64__) || defined(_M_ARM64)
+#define SM4_ARM64_TARGET 1
+#endif
+
+#if defined(SM4_ARM64_TARGET)
+#if defined(_MSC_VER)
+#include <arm64_neon.h>
+#else
 #include <arm_neon.h>
+#endif
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -108,7 +123,7 @@ static void sm4_init_t_tables(void) {
  * This is constant-time and parallel across 16 bytes.
  * =========================================================================== */
 
-#ifdef __aarch64__
+#if defined(SM4_ARM64_TARGET)
 
 static uint8x16_t neon_sbox_rows[16];  /* 16 rows of 16 bytes each */
 static int neon_sbox_ok = 0;
@@ -158,7 +173,7 @@ static inline uint8x16_t neon_sbox_apply(uint8x16_t input) {
     return vld1q_u8(out);
 }
 
-#endif /* __aarch64__ */
+#endif /* SM4_ARM64_TARGET */
 
 /* ===========================================================================
  * Method 3: ARMv8.4-A SM4E/SM4EKEY crypto extension
@@ -175,7 +190,7 @@ static inline uint8x16_t neon_sbox_apply(uint8x16_t input) {
  *   uint32x4_t vsm4ekeyq_u32(uint32x4_t rk_prev, uint32x4_t rk_next);
  * =========================================================================== */
 
-#ifdef __aarch64__
+#if defined(SM4_ARM64_TARGET)
 
 /* Check if SM4 crypto extension is available at runtime */
 static int sm4e_available(void) {
@@ -208,7 +223,7 @@ static void sm4e_key_schedule(const uint8_t key[16], uint32x4_t rk[8]) {
 }
 #endif
 
-#endif /* __aarch64__ */
+#endif /* SM4_ARM64_TARGET */
 
 /* ===========================================================================
  * Key schedule (scalar, shared)
@@ -276,7 +291,7 @@ static void sm4_t_table_encrypt(const uint8_t in[16], uint8_t out[16],
  * They perform 64-bit × 64-bit → 128-bit carry-less multiply in GF(2).
  * =========================================================================== */
 
-#if defined(__aarch64__) && defined(__ARM_FEATURE_CRYPTO)
+#if defined(SM4_ARM64_TARGET) && defined(__ARM_FEATURE_CRYPTO)
 
 static void ghash_pmull(uint8x16_t *state, uint8x16_t h, uint8x16_t block) {
     uint8x16_t tmp = veorq_u8(*state, block);
@@ -308,25 +323,35 @@ static void ghash_pmull(uint8x16_t *state, uint8x16_t h, uint8x16_t block) {
     *state = vreinterpretq_u8_p128(z0);
 }
 
-#endif /* __aarch64__ && __ARM_FEATURE_CRYPTO */
+#endif /* SM4_ARM64_TARGET && __ARM_FEATURE_CRYPTO */
 
 /* ===========================================================================
  * Self-test and benchmark
  * =========================================================================== */
 
-#include <time.h>
-
 static double get_time_sec(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int initialized = 0;
+    LARGE_INTEGER counter;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        initialized = 1;
+    }
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
 }
 
 int main(void) {
     printf("=== SM4 ARM64 NEON + Crypto Extension Optimized ===\n\n");
 
     sm4_init_t_tables();
-#ifdef __aarch64__
+#if defined(SM4_ARM64_TARGET)
     sm4_init_neon_sbox();
     printf("ARM64 optimization paths:\n");
     printf("  1. T-table (4KB precomputed)\n");

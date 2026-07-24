@@ -25,8 +25,22 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#ifdef __x86_64__
-#include <immintrin.h>  /* AVX, AVX2, AVX512 */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <time.h>
+#endif
+
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+#define SM3_X86_TARGET 1
+#include <immintrin.h>
+#if defined(__AVX2__)
+#define SM3_HAVE_AVX2 1
+#endif
+#if defined(__AVX512F__)
+#define SM3_HAVE_AVX512 1
+#endif
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -167,7 +181,7 @@ void sm3_hash_scalar(const uint8_t *msg, size_t msglen, uint8_t digest[32]) {
  *   - W[68], W1[64]: message schedule vectors
  * =========================================================================== */
 
-#ifdef __x86_64__
+#if defined(SM3_HAVE_AVX2)
 
 /* Broadcast a 32-bit scalar to all 8 lanes of a YMM register */
 static inline __m256i ymm_set1_epi32(uint32_t v) {
@@ -345,6 +359,8 @@ void sm3_hash_avx2_8x(const uint8_t *msgs[8], size_t msglen,
     free(padded);
 }
 
+#endif /* SM3_HAVE_AVX2 */
+
 /* ===========================================================================
  * AVX512 multi-buffer SM3 (16 lanes, 512-bit ZMM registers)
  *
@@ -355,7 +371,7 @@ void sm3_hash_avx2_8x(const uint8_t *msgs[8], size_t msglen,
  *   - Mask registers for partial groups
  * =========================================================================== */
 
-#ifdef __AVX512F__
+#if defined(SM3_HAVE_AVX512)
 
 static inline __m512i zmm_set1_epi32(uint32_t v) {
     return _mm512_set1_epi32((int)v);
@@ -514,33 +530,41 @@ void sm3_hash_avx512_16x(const uint8_t *msgs[16], size_t msglen,
     free(padded);
 }
 
-#endif /* __AVX512F__ */
-
-#endif /* __x86_64__ */
+#endif /* SM3_HAVE_AVX512 */
 
 /* ===========================================================================
  * Self-test and benchmark
  * =========================================================================== */
 
-#include <time.h>
-
 static double get_time_sec(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int initialized = 0;
+    LARGE_INTEGER counter;
+    if (!initialized) {
+        QueryPerformanceFrequency(&freq);
+        initialized = 1;
+    }
+    QueryPerformanceCounter(&counter);
+    return (double)counter.QuadPart / (double)freq.QuadPart;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+#endif
 }
 
 int main(void) {
     printf("=== SM3 SIMD Multi-Buffer Implementation ===\n\n");
 
     /* Architecture info */
-#if defined(__AVX512F__)
+#if defined(SM3_HAVE_AVX512)
     printf("Architecture: x86 AVX-512 (16 lanes × 32-bit ZMM)\n");
-#elif defined(__AVX2__)
+#elif defined(SM3_HAVE_AVX2)
     printf("Architecture: x86 AVX2 (8 lanes × 32-bit YMM)\n");
-#elif defined(__x86_64__)
+#elif defined(SM3_X86_TARGET)
     printf("Architecture: x86-64 (scalar fallback)\n");
-#elif defined(__aarch64__)
+#elif defined(__aarch64__) || defined(_M_ARM64)
     printf("Architecture: ARM64 (see sm3_arm_neon.c for NEON path)\n");
 #else
     printf("Architecture: generic (scalar only)\n");
@@ -564,7 +588,7 @@ int main(void) {
     printf("SM3(\"abc\") test: %s\n",
            memcmp(digest, expected, 32) == 0 ? "PASS" : "FAIL");
 
-#if defined(__AVX2__)
+#if defined(SM3_HAVE_AVX2)
     {
         char msgbuf[8][40];
         const uint8_t *msgs[8];
@@ -585,7 +609,7 @@ int main(void) {
     }
 #endif
 
-#if defined(__AVX512F__)
+#if defined(SM3_HAVE_AVX512)
     {
         char msgbuf[16][44];
         const uint8_t *msgs[16];
@@ -621,10 +645,18 @@ int main(void) {
     double mib = (double)(N * 64) / (1024.0 * 1024.0);
     printf("  Scalar: %.4f s,  %.2f MiB/s processed\n", elapsed, mib / elapsed);
 
-#ifdef __x86_64__
+#if defined(SM3_X86_TARGET)
     printf("\nSIMD optimization paths (when compiled with flags):\n");
+#if defined(SM3_HAVE_AVX2)
     printf("  AVX2  (8 lanes):  VPXOR/VPAND/VPOR/VPADDD/VPSLLD/VPSRLD\n");
+#else
+    printf("  AVX2  (8 lanes):  requires /arch:AVX2 or -mavx2\n");
+#endif
+#if defined(SM3_HAVE_AVX512)
     printf("  AVX512 (16 lanes): VPTERNLOGD (3-in boolean) + VPROLD (rotate)\n");
+#else
+    printf("  AVX512 (16 lanes): requires /arch:AVX512 or -mavx512f\n");
+#endif
     printf("  Hybrid: general registers for control + SIMD for state\n");
 #endif
 
