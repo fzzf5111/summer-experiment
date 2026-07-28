@@ -46,19 +46,3 @@ python 第七次实验/run_garak_assessment.py
 第五次实验依赖 Microsoft SEAL。本机已将 SEAL 安装到仓库本地 `.local` 目录；该目录为本地依赖，不提交到 GitHub。重新克隆仓库后，可按第五次实验报告中的说明安装 SEAL，再运行 `make -C 第五次实验 run`。
 
 第七次实验依赖 garak、transformers 和 torch。本机使用仓库本地 `.garak-venv` 与 `.hf-cache` 运行测评，这些目录为本地依赖和模型缓存，不提交到 GitHub。
-
-## 当前验证状态
-
-本机已完成以下检查：
-
-```text
-第二次实验 ECDSA hash 伪造演示：PASS
-第三次实验 Python SM4/CTR/GCM/XTS：PASS
-第三次实验 x86 SM4 C 实现：PASS
-第四次实验 Python SM3 SIMD 模型：PASS
-第四次实验 x86 AVX2 C 实现：PASS
-第四次实验 x86 AVX512 目标编译：PASS
-第五次实验 Microsoft SEAL/BFV 密文卷积：PASS
-第六次实验旋转次数分析：PASS
-第七次实验 garak 三项安全测评：PASS
-```
