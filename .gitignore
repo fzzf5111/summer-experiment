@@ -14,6 +14,11 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+.garak-venv/
+.garak-config/
+.garak-data/
+.garak-cache/
+.hf-cache/
 .local/
 build/
 

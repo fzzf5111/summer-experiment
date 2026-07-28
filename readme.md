@@ -2,7 +2,7 @@
 
 组员：张宇森、王圣恺、徐啸辰、孙翌航
 
-本仓库保存暑期实验课第二次到第六次实验的代码实现和实验报告。每个实验目录中的 `README.md` 或 `readme.md` 为对应实验报告，代码文件用于复现实验结果。
+本仓库保存暑期实验课第二次到第七次实验的代码实现和实验报告。每个实验目录中的 `README.md` 或 `readme.md` 为对应实验报告，代码文件用于复现实验结果。
 
 ## 目录
 
@@ -12,7 +12,8 @@
 ├── 第三次实验/  SM4 对称密码软件实现与优化
 ├── 第四次实验/  SM3 SIMD 与通用寄存器混合优化
 ├── 第五次实验/  Microsoft SEAL/BFV 密文卷积
-└── 第六次实验/  密文卷积旋转次数最小性分析
+├── 第六次实验/  密文卷积旋转次数最小性分析
+└── 第七次实验/  garak AI 安全测评
 ```
 
 ## 实验说明
@@ -24,6 +25,8 @@
 第五次实验使用开源全同态加密库 Microsoft SEAL 4.1.2，基于 BFV batching 对 `4x4` 输入和 `3x3` 卷积核实现密文卷积，解密结果与明文卷积一致。
 
 第六次实验基于“打包、旋转、累加”策略，对直接行主序打包和 im2col 打包分别统计旋转次数，并验证 im2col 的 4 次旋转达到 `ceil(log2(9))` 理论最小值。
+
+第七次实验部署 garak 0.15.1，针对开源 GPT-2 模型完成提示注入、Base64 编码型提示注入、训练数据泄露三项测评，并保存原始测评结果和报告。
 
 ## 运行方式
 
@@ -37,8 +40,25 @@ make -C 第四次实验 sm3_x86_avx512
 
 make -C 第五次实验 run
 python3 第六次实验/rotation_minimum_analysis.py
+python 第七次实验/run_garak_assessment.py
 ```
 
 第五次实验依赖 Microsoft SEAL。本机已将 SEAL 安装到仓库本地 `.local` 目录；该目录为本地依赖，不提交到 GitHub。重新克隆仓库后，可按第五次实验报告中的说明安装 SEAL，再运行 `make -C 第五次实验 run`。
 
+第七次实验依赖 garak、transformers 和 torch。本机使用仓库本地 `.garak-venv` 与 `.hf-cache` 运行测评，这些目录为本地依赖和模型缓存，不提交到 GitHub。
 
+## 当前验证状态
+
+本机已完成以下检查：
+
+```text
+第二次实验 ECDSA hash 伪造演示：PASS
+第三次实验 Python SM4/CTR/GCM/XTS：PASS
+第三次实验 x86 SM4 C 实现：PASS
+第四次实验 Python SM3 SIMD 模型：PASS
+第四次实验 x86 AVX2 C 实现：PASS
+第四次实验 x86 AVX512 目标编译：PASS
+第五次实验 Microsoft SEAL/BFV 密文卷积：PASS
+第六次实验旋转次数分析：PASS
+第七次实验 garak 三项安全测评：PASS
+```
